@@ -1164,18 +1164,22 @@ class LifecycleManager(appId: String, val conf: CelebornConf) extends RpcEndpoin
     val parallelism = Math.min(Math.max(1, slots.size()), conf.rpcMaxParallelism)
     ThreadUtils.parmap(slots.asScala.to, "ReserveSlot", parallelism) {
       case (workerInfo, (masterLocations, slaveLocations)) =>
-        val res = requestReserveSlots(
-          workerInfo.endpoint,
-          ReserveSlots(
-            applicationId,
-            shuffleId,
-            masterLocations,
-            slaveLocations,
-            partitionSplitThreshold,
-            partitionSplitMode,
-            getPartitionType(shuffleId),
-            rangeReadFilter,
-            userIdentifier))
+        val res = if (blacklist.contains(workerInfo)) {
+          ReserveSlotsResponse(StatusCode.RESERVE_SLOTS_FAILED, "")
+        } else {
+          requestReserveSlots(
+            workerInfo.endpoint,
+            ReserveSlots(
+              applicationId,
+              shuffleId,
+              masterLocations,
+              slaveLocations,
+              partitionSplitThreshold,
+              partitionSplitMode,
+              getPartitionType(shuffleId),
+              rangeReadFilter,
+              userIdentifier))
+        }
         if (res.status.equals(StatusCode.SUCCESS)) {
           logDebug(s"Successfully allocated " +
             s"partitions buffer for ${Utils.makeShuffleKey(applicationId, shuffleId)}" +
@@ -1185,13 +1189,13 @@ class LifecycleManager(appId: String, val conf: CelebornConf) extends RpcEndpoin
             s" reserve buffers for ${Utils.makeShuffleKey(applicationId, shuffleId)}" +
             s" from worker ${workerInfo.readableAddress()}. Reason: ${res.reason}")
           reserveSlotFailedWorkers.put(workerInfo, (res.status, System.currentTimeMillis()))
+          recordWorkerFailure(reserveSlotFailedWorkers)
         }
     }
     if (failureInfos.asScala.nonEmpty) {
       logError(s"Aggregated error of reserveSlots failure:${failureInfos.asScala.foldLeft("")(
         (x, y) => s"$x \n $y")}")
     }
-    recordWorkerFailure(reserveSlotFailedWorkers)
     new util.ArrayList[WorkerInfo](reserveSlotFailedWorkers.asScala.keys.toList.asJava)
   }
 
