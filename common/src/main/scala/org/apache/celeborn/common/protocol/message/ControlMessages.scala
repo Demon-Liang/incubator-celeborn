@@ -208,6 +208,34 @@ object ControlMessages extends Logging {
         .build()
   }
 
+  object ReviveBatch {
+    def apply(
+        appId: String,
+        shuffleId: Int,
+        mapId: Int,
+        attemptId: Int,
+        partitionId: Array[Int],
+        epoch: Array[Int],
+        oldPartition: Array[PartitionLocation],
+        cause: Array[StatusCode]): PbReviveBatch = {
+      val builder = PbReviveBatch.newBuilder()
+      builder
+        .setApplicationId(appId)
+        .setShuffleId(shuffleId)
+        .setMapId(mapId)
+        .setAttemptId(attemptId)
+
+      0 until partitionId.length foreach (idx => {
+        builder.addPartitionId(partitionId(idx))
+        builder.addEpoch(epoch(idx))
+        builder.addOldPartition(PbSerDeUtils.toPbPartitionLocation(oldPartition(idx)))
+        builder.addStatus(cause(idx).getValue)
+      })
+
+      builder.build()
+    }
+  }
+
   object PartitionSplit {
     def apply(
         appId: String,
@@ -233,6 +261,21 @@ object ControlMessages extends Logging {
       partitionLocationOpt.foreach { partitionLocation =>
         builder.setLocation(PbSerDeUtils.toPbPartitionLocation(partitionLocation))
       }
+      builder.build()
+    }
+  }
+
+  object ChangeLocationsResponse {
+    def apply(locMap: util.Map[Int, (StatusCode, PartitionLocation)]): PbChangeLocationsResponse = {
+      val builder = PbChangeLocationsResponse.newBuilder()
+      locMap.asScala.foreach(entry => {
+        val id = entry._1
+        val statusCode = entry._2._1
+        val loc = entry._2._2
+        builder.addIds(id)
+        builder.addStatus(statusCode.getValue)
+        builder.addLocation(PbSerDeUtils.toPbPartitionLocation(loc))
+      })
       builder.build()
     }
   }
@@ -518,8 +561,14 @@ object ControlMessages extends Logging {
     case pb: PbRevive =>
       new TransportMessage(MessageType.REVIVE, pb.toByteArray)
 
+    case pb: PbReviveBatch =>
+      new TransportMessage(MessageType.REVIVE_BATCH, pb.toByteArray)
+
     case pb: PbChangeLocationResponse =>
       new TransportMessage(MessageType.CHANGE_LOCATION_RESPONSE, pb.toByteArray)
+
+    case pb: PbChangeLocationsResponse =>
+      new TransportMessage(MessageType.CHANGE_LOCATIONS_RESPONSE, pb.toByteArray)
 
     case MapperEnd(applicationId, shuffleId, mapId, attemptId, numMappers) =>
       val payload = PbMapperEnd.newBuilder()
@@ -865,8 +914,14 @@ object ControlMessages extends Logging {
       case REVIVE =>
         PbRevive.parseFrom(message.getPayload)
 
+      case REVIVE_BATCH =>
+        PbReviveBatch.parseFrom(message.getPayload)
+
       case CHANGE_LOCATION_RESPONSE =>
         PbChangeLocationResponse.parseFrom(message.getPayload)
+
+      case CHANGE_LOCATIONS_RESPONSE =>
+        PbChangeLocationsResponse.parseFrom(message.getPayload)
 
       case MAPPER_END =>
         val pbMapperEnd = PbMapperEnd.parseFrom(message.getPayload)

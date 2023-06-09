@@ -210,7 +210,7 @@ class PushDataHandler extends BaseMessageHandler with Logging {
     // This should before return exception to make current push data can revive and retry.
     if (shutdown.get()) {
       logInfo(s"Push data return HARD_SPLIT for shuffle $shuffleKey since worker shutdown.")
-      callback.onSuccess(ByteBuffer.wrap(Array[Byte](StatusCode.HARD_SPLIT.getValue)))
+      callback.onSuccess(ByteBuffer.wrap(Array[Byte](StatusCode.WORKER_SHUTDOWN.getValue)))
       return
     }
 
@@ -395,7 +395,8 @@ class PushDataHandler extends BaseMessageHandler with Logging {
     // During worker shutdown, worker will return HARD_SPLIT for all existed partition.
     // This should before return exception to make current push data can revive and retry.
     if (shutdown.get()) {
-      callback.onSuccess(ByteBuffer.wrap(Array[Byte](StatusCode.HARD_SPLIT.getValue)))
+      logInfo("shutting down, return WORKER_SHUTDOWN")
+      callback.onSuccess(ByteBuffer.wrap(Array[Byte](StatusCode.WORKER_SHUTDOWN.getValue)))
       return
     }
 

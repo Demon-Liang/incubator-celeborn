@@ -17,23 +17,50 @@
 
 package org.apache.celeborn.client
 
+import java.util.concurrent.ConcurrentHashMap
+
 import org.apache.celeborn.common.protocol.PartitionLocation
-import org.apache.celeborn.common.protocol.message.ControlMessages.{ChangeLocationResponse, RegisterShuffleResponse}
+import org.apache.celeborn.common.protocol.message.ControlMessages.{ChangeLocationResponse, ChangeLocationsResponse, RegisterShuffleResponse}
 import org.apache.celeborn.common.protocol.message.StatusCode
 import org.apache.celeborn.common.rpc.RpcCallContext
 
 trait RequestLocationCallContext {
-  def reply(status: StatusCode, partitionLocationOpt: Option[PartitionLocation]): Unit
+  def reply(id: Int, status: StatusCode, partitionLocationOpt: Option[PartitionLocation]): Unit
 }
 
 case class ChangeLocationCallContext(context: RpcCallContext) extends RequestLocationCallContext {
-  override def reply(status: StatusCode, partitionLocationOpt: Option[PartitionLocation]): Unit = {
+  override def reply(
+      id: Int,
+      status: StatusCode,
+      partitionLocationOpt: Option[PartitionLocation]): Unit = {
     context.reply(ChangeLocationResponse(status, partitionLocationOpt))
   }
 }
 
+case class ChangeLocationsCallContext(context: RpcCallContext, count: Int)
+  extends RequestLocationCallContext {
+  val locMap = new ConcurrentHashMap[Int, (StatusCode, PartitionLocation)](count)
+  override def reply(
+      id: Int,
+      status: StatusCode,
+      partitionLocationOpt: Option[PartitionLocation]): Unit = {
+    locMap.putIfAbsent(id, (status, partitionLocationOpt.getOrElse(new PartitionLocation())))
+    if (locMap.size() == count) {
+      locMap.synchronized {
+        if (locMap.size() == count || id == -1) {
+          context.reply(ChangeLocationsResponse(locMap))
+          locMap.clear()
+        }
+      }
+    }
+  }
+}
+
 case class ApplyNewLocationCallContext(context: RpcCallContext) extends RequestLocationCallContext {
-  override def reply(status: StatusCode, partitionLocationOpt: Option[PartitionLocation]): Unit = {
+  override def reply(
+      id: Int,
+      status: StatusCode,
+      partitionLocationOpt: Option[PartitionLocation]): Unit = {
     partitionLocationOpt match {
       case Some(partitionLocation) =>
         context.reply(RegisterShuffleResponse(status, Array(partitionLocation)))

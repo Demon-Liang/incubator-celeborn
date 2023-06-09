@@ -161,7 +161,7 @@ class ChangePartitionManager(
         // If new slot for the partition has been allocated, reply and return.
         // Else register and allocate for it.
         getLatestPartition(shuffleId, partitionId, oldEpoch).foreach { latestLoc =>
-          context.reply(StatusCode.SUCCESS, Some(latestLoc))
+          context.reply(partitionId, StatusCode.SUCCESS, Some(latestLoc))
           logDebug(s"New partition found, old partition $partitionId-$oldEpoch return it." +
             s" shuffleId: $shuffleId $latestLoc")
           return
@@ -204,6 +204,7 @@ class ChangePartitionManager(
     // Blacklist all failed workers
     if (changePartitions.exists(_.causes.isDefined)) {
       changePartitions.filter(_.causes.isDefined).foreach { changePartition =>
+        logInfo("cause is " + changePartition.causes.get)
         lifecycleManager.blacklistPartition(
           shuffleId,
           changePartition.oldPartition,
@@ -224,6 +225,7 @@ class ChangePartitionManager(
         }
       }.foreach { case (newLocation, requests) =>
         requests.map(_.asScala.toList.foreach(_.context.reply(
+          newLocation.getId,
           StatusCode.SUCCESS,
           Option(newLocation))))
       }
@@ -239,7 +241,8 @@ class ChangePartitionManager(
           Option(requestsMap.remove(changePartition.partitionId))
         }
       }.foreach { requests =>
-        requests.map(_.asScala.toList.foreach(_.context.reply(status, None)))
+        requests.map(_.asScala.toList.foreach(req =>
+          req.context.reply(req.partitionId, status, None)))
       }
     }
 

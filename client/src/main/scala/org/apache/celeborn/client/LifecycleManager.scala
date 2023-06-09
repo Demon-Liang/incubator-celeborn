@@ -22,15 +22,12 @@ import java.util
 import java.util.{function, List => JList}
 import java.util.concurrent.{Callable, ConcurrentHashMap, ScheduledExecutorService, ScheduledFuture, TimeUnit}
 import java.util.concurrent.atomic.{AtomicInteger, AtomicLong, LongAdder}
-
 import scala.collection.JavaConverters._
 import scala.collection.mutable
 import scala.util.Random
-
 import com.google.common.annotations.VisibleForTesting
 import com.google.common.cache.{Cache, CacheBuilder}
 import org.roaringbitmap.RoaringBitmap
-
 import org.apache.celeborn.common.CelebornConf
 import org.apache.celeborn.common.haclient.RssHARetryClient
 import org.apache.celeborn.common.identity.{IdentityProvider, UserIdentifier}
@@ -439,10 +436,33 @@ class LifecycleManager(appId: String, val conf: CelebornConf) extends RpcEndpoin
         shuffleId,
         mapId,
         attemptId,
-        partitionId,
-        epoch,
-        oldPartition,
-        cause)
+        Array(partitionId),
+        Array(epoch),
+        Array(oldPartition),
+        Array(cause))
+
+    case pb: PbReviveBatch =>
+      val applicationId = pb.getApplicationId
+      val shuffleId = pb.getShuffleId
+      val mapId = pb.getMapId
+      val attemptId = pb.getAttemptId
+      val ids = pb.getPartitionIdList.asScala.map(_.toInt).toArray
+      val epoches = pb.getEpochList.asScala.map(_.toInt).toArray
+      val oldPartitions = pb.getOldPartitionList.asScala.map(PbSerDeUtils.fromPbPartitionLocation(_)).toArray
+      val causes = pb.getStatusList.asScala.map(Utils.toStatusCode(_)).toArray
+      logTrace(s"Received ReviveBatch request, " +
+        s"$applicationId, $shuffleId, $mapId, $attemptId, ,${ids.mkString(",")}," +
+        s" ${epoches.mkString(",")}, ${oldPartitions.mkString(",")}, ${causes.mkString(",")}")
+      handleRevive(
+        context,
+        applicationId,
+        shuffleId,
+        mapId,
+        attemptId,
+        ids,
+        epoches,
+        oldPartitions,
+        causes)
 
     case pb: PbPartitionSplit =>
       val applicationId = pb.getApplicationId
@@ -684,12 +704,12 @@ class LifecycleManager(appId: String, val conf: CelebornConf) extends RpcEndpoin
       cause: StatusCode): Unit = {
     // only blacklist if cause is PushDataFailMain
     val failedWorker = new ConcurrentHashMap[WorkerInfo, (StatusCode, Long)]()
-    if (cause == StatusCode.PUSH_DATA_FAIL_MASTER && oldPartition != null) {
+    if ((cause == StatusCode.PUSH_DATA_FAIL_MASTER || cause == StatusCode.WORKER_SHUTDOWN) && oldPartition != null) {
       val tmpWorker = oldPartition.getWorker
       val worker = workerSnapshots(shuffleId).keySet().asScala
         .find(_.equals(tmpWorker))
       if (worker.isDefined) {
-        failedWorker.put(worker.get, (StatusCode.PUSH_DATA_FAIL_MASTER, System.currentTimeMillis()))
+        failedWorker.put(worker.get, (cause, System.currentTimeMillis()))
       }
     }
     if (!failedWorker.isEmpty) {
@@ -703,14 +723,15 @@ class LifecycleManager(appId: String, val conf: CelebornConf) extends RpcEndpoin
       shuffleId: Int,
       mapId: Int,
       attemptId: Int,
-      partitionId: Int,
-      oldEpoch: Int,
-      oldPartition: PartitionLocation,
-      cause: StatusCode): Unit = {
+      partitionIds: Array[Int],
+      oldEpochs: Array[Int],
+      oldPartitions: Array[PartitionLocation],
+      causes: Array[StatusCode]): Unit = {
+    val contextWrapper = ChangeLocationsCallContext(context, partitionIds.length)
     // If shuffle not registered, reply ShuffleNotRegistered and return
     if (!registeredShuffle.contains(shuffleId)) {
       logError(s"[handleRevive] shuffle $shuffleId not registered!")
-      context.reply(ChangeLocationResponse(StatusCode.SHUFFLE_NOT_REGISTERED, None))
+      contextWrapper.reply(-1, StatusCode.SHUFFLE_NOT_REGISTERED, None)
       return
     }
 
@@ -719,21 +740,23 @@ class LifecycleManager(appId: String, val conf: CelebornConf) extends RpcEndpoin
       && shuffleMapperAttempts.get(shuffleId)(mapId) != -1) {
       logWarning(s"[handleRevive] Mapper ended, mapId $mapId, current attemptId $attemptId, " +
         s"ended attemptId ${shuffleMapperAttempts.get(shuffleId)(mapId)}, shuffleId $shuffleId.")
-      context.reply(ChangeLocationResponse(StatusCode.MAP_ENDED, None))
+      contextWrapper.reply(-1, StatusCode.MAP_ENDED, None)
       return
     }
 
-    logWarning(s"Do Revive for shuffle ${Utils.makeShuffleKey(applicationId, shuffleId)}, " +
-      s"oldPartition: $oldPartition, cause: $cause")
+    logDebug(s"Do Revive for shuffle ${Utils.makeShuffleKey(applicationId, shuffleId)}, " +
+      s"oldPartition: ${oldPartitions.mkString(",")}, cause: ${causes.mkString(",")}")
 
-    changePartitionManager.handleRequestPartitionLocation(
-      ChangeLocationCallContext(context),
-      applicationId,
-      shuffleId,
-      partitionId,
-      oldEpoch,
-      oldPartition,
-      Some(cause))
+    0 until partitionIds.length foreach (idx => {
+      changePartitionManager.handleRequestPartitionLocation(
+        contextWrapper,
+        applicationId,
+        shuffleId,
+        partitionIds(idx),
+        oldEpochs(idx),
+        oldPartitions(idx),
+        Some(causes(idx)))
+    })
   }
 
   private def handleMapperEnd(
@@ -1252,7 +1275,7 @@ class LifecycleManager(appId: String, val conf: CelebornConf) extends RpcEndpoin
       }
     if (!destroyResource.isEmpty) {
       destroySlotsWithRetry(applicationId, shuffleId, destroyResource)
-      logInfo(s"Destroyed peer partitions for reserve buffer failed workers " +
+      logDebug(s"Destroyed peer partitions for reserve buffer failed workers " +
         s"${Utils.makeShuffleKey(applicationId, shuffleId)}, $destroyResource")
 
       val workerIds = new util.ArrayList[String]()
@@ -1264,7 +1287,7 @@ class LifecycleManager(appId: String, val conf: CelebornConf) extends RpcEndpoin
       }
       val msg = ReleaseSlots(applicationId, shuffleId, workerIds, workerSlotsPerDisk)
       requestReleaseSlots(rssHARetryClient, msg)
-      logInfo(s"Released slots for reserve buffer failed workers " +
+      logDebug(s"Released slots for reserve buffer failed workers " +
         s"${workerIds.asScala.mkString(",")}" + s"${slots.asScala.mkString(",")}" +
         s"${Utils.makeShuffleKey(applicationId, shuffleId)}, ")
     }

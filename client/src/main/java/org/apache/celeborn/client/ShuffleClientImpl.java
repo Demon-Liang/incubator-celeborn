@@ -175,7 +175,7 @@ public class ShuffleClientImpl extends ShuffleClient {
       pushState.removeBatch(batchId);
     } else {
       PartitionLocation newLoc = reducePartitionMap.get(shuffleId).get(partitionId);
-      logger.info("Revive success, new location for reduce {} is {}.", partitionId, newLoc);
+      logger.debug("Revive success, new location for reduce {} is {}.", partitionId, newLoc);
       try {
         TransportClient client =
             dataClientFactory.createClient(newLoc.getHost(), newLoc.getPushPort(), partitionId);
@@ -209,27 +209,34 @@ public class ShuffleClientImpl extends ShuffleClient {
       StatusCode cause,
       Integer oldGroupedBatchId) {
     HashMap<String, DataBatches> newDataBatchesMap = new HashMap<>();
-    for (DataBatches.DataBatch batch : batches) {
-      int partitionId = batch.loc.getId();
-      if (!revive(
-          applicationId,
-          shuffleId,
-          mapId,
-          attemptId,
-          partitionId,
-          batch.loc.getEpoch(),
-          batch.loc,
-          cause)) {
-        pushState.exception.compareAndSet(
-            null,
-            new IOException("Revive Failed in retry push merged data for location: " + batch.loc));
-        return;
-      } else if (mapperEnded(shuffleId, mapId, attemptId)) {
-        logger.debug(
-            "Retrying push data, but the mapper(map {} attempt {}) has ended.", mapId, attemptId);
-      } else {
-        PartitionLocation newLoc = reducePartitionMap.get(shuffleId).get(partitionId);
-        logger.info("Revive success, new location for reduce {} is {}.", partitionId, newLoc);
+    int[] ids = new int[batches.size()];
+    int[] epoches = new int[batches.size()];
+    PartitionLocation[] locs = new PartitionLocation[batches.size()];
+    StatusCode[] causes = new StatusCode[batches.size()];
+
+    for (int i = 0; i < batches.size(); i++) {
+      DataBatches.DataBatch batch = batches.get(i);
+      ids[i] = batch.loc.getId();
+      epoches[i] = batch.loc.getEpoch();
+      locs[i] = batch.loc;
+      causes[i] = cause;
+    }
+
+    boolean reviveSuccess =
+        reviveBatch(applicationId, shuffleId, mapId, attemptId, ids, epoches, locs, causes);
+    if (!reviveSuccess) {
+      pushState.exception.compareAndSet(
+          null,
+          new IOException(
+              "Revive Failed in retry push merged data for location: " + locs[0].getHost()));
+      return;
+    } else if (mapperEnded(shuffleId, mapId, attemptId)) {
+      logger.debug(
+          "Retrying push data, but the mapper(map {} attempt {}) has ended.", mapId, attemptId);
+    } else {
+      for (int i = 0; i < batches.size(); i++) {
+        DataBatches.DataBatch batch = batches.get(i);
+        PartitionLocation newLoc = reducePartitionMap.get(shuffleId).get(batch.loc.getId());
         DataBatches newDataBatches =
             newDataBatchesMap.computeIfAbsent(genAddressPair(newLoc), (s) -> new DataBatches());
         newDataBatches.addDataBatch(newLoc, batch.batchId, batch.body);
@@ -395,20 +402,22 @@ public class ShuffleClientImpl extends ShuffleClient {
     PartitionLocation currentLocation = map.get(partitionId);
     if (currentLocation != null && currentLocation.getEpoch() > epoch) {
       return true;
+    } else {
+      return false;
     }
+//
+//    long sleepTimeMs = RND.nextInt(50);
+//    if (sleepTimeMs > 30) {
+//      try {
+//        TimeUnit.MILLISECONDS.sleep(sleepTimeMs);
+//      } catch (InterruptedException e) {
+//        logger.warn("Wait revived location interrupted", e);
+//        Thread.currentThread().interrupt();
+//      }
+//    }
 
-    long sleepTimeMs = RND.nextInt(50);
-    if (sleepTimeMs > 30) {
-      try {
-        TimeUnit.MILLISECONDS.sleep(sleepTimeMs);
-      } catch (InterruptedException e) {
-        logger.warn("Wait revived location interrupted", e);
-        Thread.currentThread().interrupt();
-      }
-    }
-
-    currentLocation = map.get(partitionId);
-    return currentLocation != null && currentLocation.getEpoch() > epoch;
+//    currentLocation = map.get(partitionId);
+//    return currentLocation != null && currentLocation.getEpoch() > epoch;
   }
 
   private boolean revive(
@@ -431,6 +440,28 @@ public class ShuffleClientImpl extends ShuffleClient {
           epoch);
       return true;
     }
+
+    return reviveBatch(
+        applicationId,
+        shuffleId,
+        mapId,
+        attemptId,
+        new int[] {partitionId},
+        new int[] {epoch},
+        new PartitionLocation[] {oldLocation},
+        new StatusCode[] {cause});
+  }
+
+  private boolean reviveBatch(
+      String applicationId,
+      int shuffleId,
+      int mapId,
+      int attemptId,
+      int[] partitionIds,
+      int[] epoches,
+      PartitionLocation[] oldLocations,
+      StatusCode[] causes) {
+    ConcurrentHashMap<Integer, PartitionLocation> map = reducePartitionMap.get(shuffleId);
     String mapKey = Utils.makeMapKey(shuffleId, mapId, attemptId);
     if (mapperEnded(shuffleId, mapId, attemptId)) {
       logger.debug(
@@ -442,36 +473,45 @@ public class ShuffleClientImpl extends ShuffleClient {
     }
 
     try {
-      PbChangeLocationResponse response =
+      PbChangeLocationsResponse response =
           driverRssMetaService.askSync(
-              Revive$.MODULE$.apply(
+              ReviveBatch$.MODULE$.apply(
                   applicationId,
                   shuffleId,
                   mapId,
                   attemptId,
-                  partitionId,
-                  epoch,
-                  oldLocation,
-                  cause),
+                  partitionIds,
+                  epoches,
+                  oldLocations,
+                  causes),
               conf.requestPartitionLocationRpcAskTimeout(),
-              ClassTag$.MODULE$.apply(PbChangeLocationResponse.class));
-      // per partitionKey only serve single PartitionLocation in Client Cache.
-      StatusCode respStatus = Utils.toStatusCode(response.getStatus());
-      if (StatusCode.SUCCESS.equals(respStatus)) {
-        map.put(partitionId, PbSerDeUtils.fromPbPartitionLocation(response.getLocation()));
-        return true;
-      } else if (StatusCode.MAP_ENDED.equals(respStatus)) {
-        mapperEndMap.computeIfAbsent(shuffleId, (id) -> ConcurrentHashMap.newKeySet()).add(mapKey);
-        return true;
-      } else {
-        return false;
+              ClassTag$.MODULE$.apply(PbChangeLocationsResponse.class));
+      boolean allSuccess = true;
+      for (int i = 0; i < response.getIdsCount(); i++) {
+        if (StatusCode.SUCCESS.equals(Utils.toStatusCode(response.getStatus(i)))) {
+          map.put(
+              response.getIds(i), PbSerDeUtils.fromPbPartitionLocation(response.getLocation(i)));
+        } else {
+          logger.info("StatusCode not SUCCESS! {}", response.getStatus(i));
+          allSuccess = false;
+        }
       }
+      if (!allSuccess) {
+        StatusCode firstStatus = Utils.toStatusCode(response.getStatus(0));
+        if (StatusCode.MAP_ENDED.equals(firstStatus)) {
+          mapperEndMap
+              .computeIfAbsent(shuffleId, (id) -> ConcurrentHashMap.newKeySet())
+              .add(mapKey);
+          return true;
+        }
+      }
+      return allSuccess;
     } catch (Exception e) {
       logger.error(
           "Exception raised while reviving for shuffle {} reduce {} epoch {}.",
           shuffleId,
-          partitionId,
-          epoch,
+          partitionIds,
+          epoches,
           e);
       return false;
     }
@@ -645,7 +685,8 @@ public class ShuffleClientImpl extends ShuffleClient {
                       nextBatchId);
                   splitPartition(shuffleId, partitionId, applicationId, loc);
                   callback.onSuccess(response);
-                } else if (reason == StatusCode.HARD_SPLIT.getValue()) {
+                } else if (reason == StatusCode.HARD_SPLIT.getValue() ||
+                reason == StatusCode.WORKER_SHUTDOWN.getValue()) {
                   logger.debug(
                       "Push data split for map {} attempt {} batch {}.",
                       mapId,
@@ -663,7 +704,7 @@ public class ShuffleClientImpl extends ShuffleClient {
                               loc,
                               this,
                               pushState,
-                              StatusCode.HARD_SPLIT));
+                              Utils.toStatusCode(reason)));
                 } else {
                   response.rewind();
                   callback.onSuccess(response);
@@ -944,7 +985,8 @@ public class ShuffleClientImpl extends ShuffleClient {
           public void onSuccess(ByteBuffer response) {
             if (response.remaining() > 0) {
               byte reason = response.get();
-              if (reason == StatusCode.HARD_SPLIT.getValue()) {
+              if (reason == StatusCode.HARD_SPLIT.getValue() ||
+                reason == StatusCode.WORKER_SHUTDOWN.getValue()) {
                 logger.info(
                     "Push merged data return hard split for map "
                         + mapId
@@ -962,7 +1004,7 @@ public class ShuffleClientImpl extends ShuffleClient {
                             mapId,
                             attemptId,
                             batches,
-                            StatusCode.HARD_SPLIT,
+                            Utils.toStatusCode(reason),
                             groupedBatchId));
               } else {
                 // Should not happen in current architecture.
