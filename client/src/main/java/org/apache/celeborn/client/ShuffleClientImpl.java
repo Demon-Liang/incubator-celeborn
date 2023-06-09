@@ -688,10 +688,11 @@ public class ShuffleClientImpl extends ShuffleClient {
                 } else if (reason == StatusCode.HARD_SPLIT.getValue() ||
                 reason == StatusCode.WORKER_SHUTDOWN.getValue()) {
                   logger.debug(
-                      "Push data split for map {} attempt {} batch {}.",
+                      "Push data split for map {} attempt {} batch {} reason {}.",
                       mapId,
                       attemptId,
-                      nextBatchId);
+                      nextBatchId,
+                    reason);
                   pushDataRetryPool.submit(
                       () ->
                           submitRetryPushData(
@@ -994,7 +995,8 @@ public class ShuffleClientImpl extends ShuffleClient {
                         + attemptId
                         + " batches "
                         + Arrays.toString(batchIds)
-                        + ".");
+                        + ". reason is "
+                + reason);
                 pushDataRetryPool.submit(
                     () ->
                         submitRetryPushMergedData(
