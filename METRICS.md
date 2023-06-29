@@ -64,7 +64,7 @@ Here is an example of grafana dashboard importing.
 |               MetricName               |       Role        |                                                   Description                                                   |
 |:--------------------------------------:|:-----------------:|:---------------------------------------------------------------------------------------------------------------:|
 |              WorkerCount               |      master       |                                          The count of active workers.                                           |
-|         BlacklistedWorkerCount         |      master       |                                       The count of workers in blacklist.                                        |
+|          ExcludedWorkerCount           |      master       |                                     The count of workers in excluded list.                                      |
 |             OfferSlotsTime             |      master       |                                            The time of offer slots.                                             |
 |             PartitionSize              |      master       |          The estimated partition size of last 20 flush window whose length is 15 seconds by defaults.           |
 |         RegisteredShuffleCount         | master and worker |                                  The value means count of registered shuffle.                                   |
@@ -73,8 +73,8 @@ Here is an example of grafana dashboard importing.
 |             FlushDataTime              |      worker       |                                  FlushData means flush a disk buffer to disk.                                   |
 |             OpenStreamTime             |      worker       |            OpenStream means read a shuffle file and send client about chunks size and stream index.             |
 |             FetchChunkTime             |      worker       |                      FetchChunk means read a chunk from a shuffle file and send to client.                      |
-|           MasterPushDataTime           |      worker       |                       MasterPushData means handle pushdata of master partition location.                        |
-|           SlavePushDataTime            |      worker       |                        SlavePushData means handle pushdata of slave partition location.                         |
+|           PrimaryPushDataTime          |      worker       |                       PrimaryPushData means handle pushdata of primary partition location.                        |
+|           ReplicaPushDataTime          |      worker       |                        ReplicaPushData means handle pushdata of replica partition location.                         |
 |           WriteDataFailCount           |      worker       |                    The count of writing PushData or PushMergedData failed in current worker.                    |
 |         ReplicateDataFailCount         |      worker       |                  The count of replicating PushData or PushMergedData failed in current worker.                  |
 |      ReplicateDataWriteFailCount       |      worker       |       The count of replicating PushData or PushMergedData failed caused by write failure in peer worker.        |
