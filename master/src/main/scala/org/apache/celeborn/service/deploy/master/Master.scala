@@ -26,7 +26,7 @@ import scala.collection.JavaConverters._
 import scala.util.Random
 
 import org.apache.celeborn.common.CelebornConf
-import org.apache.celeborn.common.haclient.RssHARetryClient
+import org.apache.celeborn.common.client.MasterClient
 import org.apache.celeborn.common.identity.UserIdentifier
 import org.apache.celeborn.common.internal.Logging
 import org.apache.celeborn.common.meta.{DiskInfo, WorkerInfo}
@@ -141,14 +141,16 @@ private[celeborn] class Master(
   // init and register master metrics
   val resourceConsumptionSource = new ResourceConsumptionSource(conf)
   private val masterSource = new MasterSource(conf)
-  masterSource.addGauge(
-    MasterSource.RegisteredShuffleCount,
-    _ => statusSystem.registeredShuffle.size())
-  masterSource.addGauge(MasterSource.ExcludedWorkerCount, _ => statusSystem.excludedWorkers.size())
-  masterSource.addGauge(MasterSource.WorkerCount, _ => statusSystem.workers.size())
-  masterSource.addGauge(MasterSource.LostWorkerCount, _ => statusSystem.lostWorkers.size())
-  masterSource.addGauge(MasterSource.PartitionSize, _ => statusSystem.estimatedPartitionSize)
-  masterSource.addGauge(MasterSource.IsActiveMaster, _ => isMasterActive)
+  masterSource.addGauge(MasterSource.REGISTERED_SHUFFLE_COUNT) { () =>
+    statusSystem.registeredShuffle.size
+  }
+  masterSource.addGauge(MasterSource.EXCLUDED_WORKER_COUNT) { () =>
+    statusSystem.excludedWorkers.size
+  }
+  masterSource.addGauge(MasterSource.WORKER_COUNT) { () => statusSystem.workers.size }
+  masterSource.addGauge(MasterSource.LOST_WORKER_COUNT) { () => statusSystem.lostWorkers.size }
+  masterSource.addGauge(MasterSource.PARTITION_SIZE) { () => statusSystem.estimatedPartitionSize }
+  masterSource.addGauge(MasterSource.IS_ACTIVE_MASTER) { () => isMasterActive }
 
   metricsSystem.registerSource(resourceConsumptionSource)
   metricsSystem.registerSource(masterSource)
@@ -182,7 +184,7 @@ private[celeborn] class Master(
   }
 
   override def onStop(): Unit = {
-    logInfo("Stopping RSS Master.")
+    logInfo("Stopping Celeborn Master.")
     if (checkForWorkerTimeOutTask != null) {
       checkForWorkerTimeOutTask.cancel(true)
     }
@@ -190,7 +192,7 @@ private[celeborn] class Master(
       checkForApplicationTimeOutTask.cancel(true)
     }
     forwardMessageThread.shutdownNow()
-    logInfo("RSS Master is stopped.")
+    logInfo("Celeborn Master is stopped.")
   }
 
   override def onDisconnected(address: RpcAddress): Unit = {
@@ -369,7 +371,7 @@ private[celeborn] class Master(
           worker.pushPort,
           worker.fetchPort,
           worker.replicatePort,
-          RssHARetryClient.genRequestId()))
+          MasterClient.genRequestId()))
       }
       ind += 1
     }
@@ -384,7 +386,7 @@ private[celeborn] class Master(
     statusSystem.appHeartbeatTime.keySet().asScala.foreach { key =>
       if (statusSystem.appHeartbeatTime.get(key) < currentTime - appHeartbeatTimeoutMs) {
         logWarning(s"Application $key timeout, trigger applicationLost event.")
-        val requestId = RssHARetryClient.genRequestId()
+        val requestId = MasterClient.genRequestId()
         var res = self.askSync[ApplicationLostResponse](ApplicationLost(key, requestId))
         var retry = 1
         while (res.status != StatusCode.SUCCESS && retry <= 3) {
@@ -437,7 +439,7 @@ private[celeborn] class Master(
         expiredShuffleKeys.add(shuffleKey)
       }
     }
-    context.reply(HeartbeatResponse(expiredShuffleKeys, registered))
+    context.reply(HeartbeatFromWorkerResponse(expiredShuffleKeys, registered))
   }
 
   private def handleWorkerLost(
@@ -540,7 +542,7 @@ private[celeborn] class Master(
     val availableWorkers = workersAvailable()
     // offer slots
     val slots =
-      masterSource.sample(MasterSource.OfferSlotsTime, s"offerSlots-${Random.nextInt()}") {
+      masterSource.sample(MasterSource.OFFER_SLOTS_TIME, s"offerSlots-${Random.nextInt()}") {
         statusSystem.workers.synchronized {
           if (slotsAssignPolicy == SlotsAssignPolicy.LOADAWARE && !conf.hasHDFSStorage) {
             SlotsAllocator.offerSlotsLoadAware(
@@ -710,22 +712,18 @@ private[celeborn] class Master(
       userIdentifier: UserIdentifier,
       context: RpcCallContext): Unit = {
 
-    resourceConsumptionSource.addGauge(
-      "diskFileCount",
-      _ => computeUserResourceConsumption(userIdentifier).diskFileCount,
-      userIdentifier.toMap)
-    resourceConsumptionSource.addGauge(
-      "diskBytesWritten",
-      _ => computeUserResourceConsumption(userIdentifier).diskBytesWritten,
-      userIdentifier.toMap)
-    resourceConsumptionSource.addGauge(
-      "hdfsFileCount",
-      _ => computeUserResourceConsumption(userIdentifier).hdfsFileCount,
-      userIdentifier.toMap)
-    resourceConsumptionSource.addGauge(
-      "hdfsBytesWritten",
-      _ => computeUserResourceConsumption(userIdentifier).hdfsBytesWritten,
-      userIdentifier.toMap)
+    resourceConsumptionSource.addGauge("diskFileCount", userIdentifier.toMap) { () =>
+      computeUserResourceConsumption(userIdentifier).diskFileCount
+    }
+    resourceConsumptionSource.addGauge("diskBytesWritten", userIdentifier.toMap) { () =>
+      computeUserResourceConsumption(userIdentifier).diskBytesWritten
+    }
+    resourceConsumptionSource.addGauge("hdfsFileCount", userIdentifier.toMap) { () =>
+      computeUserResourceConsumption(userIdentifier).hdfsFileCount
+    }
+    resourceConsumptionSource.addGauge("hdfsBytesWritten", userIdentifier.toMap) { () =>
+      computeUserResourceConsumption(userIdentifier).hdfsBytesWritten
+    }
 
     val userResourceConsumption = computeUserResourceConsumption(userIdentifier)
     val quota = quotaManager.getQuota(userIdentifier)

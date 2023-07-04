@@ -695,7 +695,8 @@ class CelebornConf(loadDefaults: Boolean) extends Cloneable with Logging with Se
   def appHeartbeatIntervalMs: Long = get(APPLICATION_HEARTBEAT_INTERVAL)
   def clientCheckedUseAllocatedWorkers: Boolean = get(CLIENT_CHECKED_USE_ALLOCATED_WORKERS)
   def clientExcludedWorkerExpireTimeout: Long = get(CLIENT_EXCLUDED_WORKER_EXPIRE_TIMEOUT)
-  def clientExcludeReplicaOnFailureEnabled: Boolean = get(CLIENT_EXCLUDE_REPLICA_ON_FAILURE_ENABLED)
+  def clientExcludeReplicaOnFailureEnabled: Boolean =
+    get(CLIENT_EXCLUDE_PEER_WORKER_ON_FAILURE_ENABLED)
 
   // //////////////////////////////////////////////////////
   //               Shuffle Compression                   //
@@ -1929,7 +1930,7 @@ object CelebornConf extends Logging {
       .doc("Worker's working dir path name.")
       .version("0.3.0")
       .stringConf
-      .createWithDefault("rss-worker/shuffle_data")
+      .createWithDefault("celeborn-worker/shuffle_data")
 
   val WORKER_STORAGE_BASE_DIR_PREFIX: ConfigEntry[String] =
     buildConf("celeborn.worker.storage.baseDir.prefix")
@@ -2575,8 +2576,8 @@ object CelebornConf extends Logging {
       .timeConf(TimeUnit.MILLISECONDS)
       .createWithDefaultString("10s")
 
-  val CLIENT_EXCLUDE_REPLICA_ON_FAILURE_ENABLED: ConfigEntry[Boolean] =
-    buildConf("celeborn.client.excludeReplicaOnFailure.enabled")
+  val CLIENT_EXCLUDE_PEER_WORKER_ON_FAILURE_ENABLED: ConfigEntry[Boolean] =
+    buildConf("celeborn.client.excludePeerWorkerOnFailure.enabled")
       .categories("client")
       .version("0.3.0")
       .doc("When true, Celeborn will exclude partition's peer worker on failure " +
@@ -2938,11 +2939,14 @@ object CelebornConf extends Logging {
       .withAlternative("celeborn.shuffle.compression.codec")
       .withAlternative("remote-shuffle.job.compression.codec")
       .categories("client")
-      .doc("The codec used to compress shuffle data. By default, Celeborn provides two codecs: `lz4` and `zstd`.")
+      .doc("The codec used to compress shuffle data. By default, Celeborn provides three codecs: `lz4`, `zstd`, `none`.")
       .version("0.3.0")
       .stringConf
       .transform(_.toUpperCase(Locale.ROOT))
-      .checkValues(Set(CompressionCodec.LZ4.name, CompressionCodec.ZSTD.name))
+      .checkValues(Set(
+        CompressionCodec.LZ4.name,
+        CompressionCodec.ZSTD.name,
+        CompressionCodec.NONE.name))
       .createWithDefault(CompressionCodec.LZ4.name)
 
   val SHUFFLE_COMPRESSION_ZSTD_LEVEL: ConfigEntry[Int] =
